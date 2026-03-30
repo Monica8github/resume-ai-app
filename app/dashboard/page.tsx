@@ -2,7 +2,12 @@
 
 import { useState, useEffect, useRef, useCallback } from "react"
 import Link from "next/link"
-import * as pdfjsLib from "pdfjs-dist"
+import type * as pdfjsLibType from "pdfjs-dist"
+let pdfjsLib: typeof pdfjsLibType
+if (typeof window !== "undefined") {
+  pdfjsLib = require("pdfjs-dist/legacy/build/pdf")
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`
+}
 import { 
   FileSearch, ArrowLeft, Upload, FileText, X, RotateCcw, 
   Sparkles, Shield, Copy, Download, Zap, Check, Loader2
