@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react"
 import Link from "next/link"
+import * as pdfjsLib from "pdfjs-dist"
 import { 
   FileSearch, ArrowLeft, Upload, FileText, X, RotateCcw, 
   Sparkles, Shield, Copy, Download, Zap, Check, Loader2
@@ -12,6 +13,8 @@ import { ResumeUploader } from "@/components/resume-uploader"
 import { AnalysisResults } from "@/components/analysis-results"
 import { AnalysisSkeleton } from "@/components/analysis-skeleton"
 import { useToast } from "@/hooks/use-toast"
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`
 
 export interface SectionFeedback {
   section: string
@@ -49,10 +52,13 @@ const SAMPLE_JD = `We are looking for a Data Analyst with:
 
 export default function DashboardPage() {
   const [resumeFile, setResumeFile] = useState<File | null>(null)
+  const [fileName, setFileName] = useState("")
   const [resumeText, setResumeText] = useState<string>("")
   const [jobDescription, setJobDescription] = useState("")
+  const [isExtracting, setIsExtracting] = useState(false)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [results, setResults] = useState<AnalysisResult | null>(null)
+  const [analysis, setAnalysis] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loadingStep, setLoadingStep] = useState(0)
   const [progress, setProgress] = useState(0)
@@ -92,28 +98,51 @@ export default function DashboardPage() {
     return () => clearInterval(interval)
   }, [isAnalyzing])
 
+  async function extractTextFromPDF(file: File): Promise<string> {
+    const arrayBuffer = await file.arrayBuffer()
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+    let fullText = ""
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i)
+      const textContent = await page.getTextContent()
+      const pageText = textContent.items.map((item: any) => item.str).join(" ")
+      fullText += pageText + "\n"
+    }
+    return fullText
+  }
+
   const handleFileSelect = async (file: File) => {
-    setResumeFile(file)
     setError(null)
-    
-    const formData = new FormData()
-    formData.append("file", file)
-    
+
+    if (file.type !== "application/pdf") {
+      setError("Please upload a PDF file.")
+      return
+    }
+
+    setIsExtracting(true)
+    setResumeFile(file)
+
     try {
-      const response = await fetch("/api/extract-pdf", {
-        method: "POST",
-        body: formData,
-      })
-      
-      if (!response.ok) {
-        throw new Error("Failed to extract PDF text")
+      const text = await extractTextFromPDF(file)
+      if (!text || text.trim().length < 50) {
+        setError("Could not extract text from PDF. Please try a different file.")
+        setResumeText("")
+        return
       }
-      
-      const data = await response.json()
-      setResumeText(data.text)
-    } catch {
-      setError("Failed to read PDF. Please try a different file.")
+
+      setResumeText(text)
+      setFileName(file.name)
+      setResults(null)
+      setAnalysis(null)
+      setError(null)
+    } catch (err) {
+      setError("Failed to read PDF. Please try again.")
+      setResumeText("")
       setResumeFile(null)
+      setResults(null)
+      setAnalysis(null)
+    } finally {
+      setIsExtracting(false)
     }
   }
 
@@ -121,58 +150,49 @@ export default function DashboardPage() {
     setResumeFile(null)
     setResumeText("")
     setResults(null)
+    setAnalysis(null)
     setError(null)
   }
 
-  const triggerAnalysis = useCallback(async () => {
-    if (!resumeText || !jobDescription) return
-    
+  const handleAnalyze = useCallback(async () => {
+    if (!resumeText || resumeText.trim().length < 50) {
+      setError("Please upload a valid resume with readable text.")
+      return
+    }
+    if (!jobDescription || jobDescription.trim().length < 20) {
+      setError("Please add a job description to analyze against.")
+      return
+    }
+
     setIsAnalyzing(true)
     setError(null)
-    
-    const totalDuration = LOADING_STEPS.reduce((acc, step) => acc + step.duration, 0)
-    await new Promise((resolve) => setTimeout(resolve, totalDuration))
-    
-    const mockData: AnalysisResult = {
-      matchScore: 78,
-      matchLevel: "Good Match",
-      atsScore: 82,
-      keywordMatch: 71,
-      roleFit: 85,
-      skillGaps: [
-        { skill: "SQL", priority: "high" },
-        { skill: "Tableau", priority: "medium" },
-        { skill: "Python", priority: "high" },
-      ],
-      matchedSkills: ["Data visualization", "Excel", "Communication", "Problem-solving"],
-      suggestions: [
-        { 
-          title: "Add quantified metrics to each role", 
-          description: "Include specific numbers and percentages to demonstrate impact, such as 'increased efficiency by 25%'." 
-        },
-        { 
-          title: "Include relevant certifications", 
-          description: "Add certifications like Google Data Analytics or SQL certifications to strengthen your profile." 
-        },
-        { 
-          title: "Add a skills section at the top", 
-          description: "Place a dedicated skills section near the top of your resume for better visibility to recruiters." 
-        },
-      ],
-      sectionFeedback: [
-        { section: "Summary", status: "good", note: "Clear and concise, but could emphasize data skills more" },
-        { section: "Skills", status: "needs-work", note: "Missing key technical skills mentioned in the job description" },
-        { section: "Experience", status: "strong", note: "Good use of action verbs and relevant experience" },
-        { section: "Projects", status: "good", note: "Consider adding more data-focused projects" },
-        { section: "Education", status: "strong", note: "Relevant degree that aligns with requirements" },
-      ],
-      atsKeywords: ["SQL", "Python", "Tableau", "data analysis", "reporting", "stakeholder management"],
-      recruiterImpression: "This resume shows strong technical foundations and relevant analytical experience. To better align with the target role, consider emphasizing measurable impact in previous positions and adding missing technical skills like SQL and Python to your skills section.",
+    setAnalysis(null)
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+      const response = await fetch(`${apiUrl}/api/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resumeText, jobDescription }),
+      })
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => null)
+        throw new Error(data?.detail || `Server error: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const analysisText = typeof data.analysis === "string" ? data.analysis : JSON.stringify(data.analysis, null, 2)
+      setAnalysis(analysisText)
+      setResults(null)
+
+    } catch (err: any) {
+      setError(`Analysis failed: ${err.message}. Make sure backend is running on port 8000.`)
+      setResults(null)
+      setAnalysis(null)
+    } finally {
+      setIsAnalyzing(false)
     }
-    
-    setProgress(100)
-    setResults(mockData)
-    setIsAnalyzing(false)
   }, [resumeText, jobDescription])
 
   const handleReAnalyze = useCallback(async () => {
@@ -184,15 +204,15 @@ export default function DashboardPage() {
       })
       return
     }
-    
+
     setResults(null)
+    setAnalysis(null)
     uploadRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
-    
-    // Auto-trigger analysis after clearing
+
     setTimeout(() => {
-      triggerAnalysis()
+      handleAnalyze()
     }, 500)
-  }, [resumeText, jobDescription, toast, triggerAnalysis])
+  }, [resumeText, jobDescription, toast, handleAnalyze])
 
   const handleUseSampleJD = () => {
     setJobDescription(SAMPLE_JD)
@@ -340,11 +360,7 @@ https://resumeai.app
     }
   }, [results, toast])
 
-  const handleAnalyze = () => {
-    triggerAnalysis()
-  }
-
-  const canAnalyze = resumeFile && resumeText && jobDescription.trim().length > 0
+  const canAnalyze = Boolean(resumeText.trim() && jobDescription.trim().length > 0 && !isExtracting && !isAnalyzing)
   const LoadingIcon = LOADING_STEPS[loadingStep]?.icon || Sparkles
 
   return (
@@ -510,26 +526,16 @@ https://resumeai.app
 
             {/* Analyze Button */}
             <div className="space-y-3">
-              <Button 
-                className="w-full h-12 rounded-xl font-semibold text-base transition-all hover:scale-[1.02] active:scale-[0.98] disabled:hover:scale-100"
-                size="lg"
-                disabled={!canAnalyze || isAnalyzing}
+              <button
                 onClick={handleAnalyze}
+                disabled={!canAnalyze}
+                className="w-full py-3 rounded-lg bg-purple-600 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {isAnalyzing ? (
-                  <span className="flex items-center gap-3">
-                    <LoadingIcon className="w-5 h-5 animate-spin-slow" />
-                    <span key={loadingStep} className="animate-step-fade">
-                      {LOADING_STEPS[loadingStep]?.text || "Analyzing..."}
-                    </span>
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-2">
-                    <Sparkles className="w-5 h-5" />
-                    Analyze Resume
-                  </span>
-                )}
-              </Button>
+                {isExtracting ? "Reading PDF..." : isAnalyzing ? "Analyzing..." : "Analyze Resume"}
+              </button>
+              {error && (
+                <p className="text-red-400 text-sm mt-2">{error}</p>
+              )}
               <p className="text-xs text-center text-muted-foreground">
                 AI will evaluate skills, keywords, and improvement opportunities
               </p>
@@ -588,6 +594,10 @@ https://resumeai.app
               <AnalysisSkeleton />
             ) : results ? (
               <AnalysisResults results={results} />
+            ) : analysis ? (
+              <div className="analysis-results p-4 bg-card/80 rounded-xl border border-border">
+                <pre className="whitespace-pre-wrap text-sm text-foreground">{analysis}</pre>
+              </div>
             ) : (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-primary/20 to-accent/20 flex items-center justify-center mb-6">
